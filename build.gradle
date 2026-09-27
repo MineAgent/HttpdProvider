@@ -1,0 +1,48 @@
+plugins {
+	id 'net.fabricmc.fabric-loom' version "${loom_version}"
+}
+
+version = project.version
+group = project.group
+
+base {
+	archivesName = project.archives_base_name
+}
+
+repositories {
+	mavenCentral()
+}
+
+dependencies {
+	// Minecraft 26.1+ ships unobfuscated (official names), so Loom needs no `mappings` dependency.
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+
+	// Only the loader is needed (no Fabric API dependency).
+	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+}
+
+processResources {
+	def modVersion = project.version
+	inputs.property "version", modVersion
+
+	filesMatching("fabric.mod.json") {
+		expand "version": modVersion
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = 25
+	it.options.encoding = "UTF-8"
+}
+
+java {
+	sourceCompatibility = JavaVersion.VERSION_25
+	targetCompatibility = JavaVersion.VERSION_25
+	withSourcesJar()
+}
+
+// Minecraft 26.1+ is unobfuscated, so there is no remapJar step: the plain jar is loadable.
+// If a Loom version does provide remapJar, name it consistently.
+tasks.matching { it.name == 'remapJar' }.configureEach {
+	archiveFileName = "httpdprovider-${project.version}.jar"
+}

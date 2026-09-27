@@ -1,0 +1,26 @@
+{
+	"schemaVersion": 1,
+	"id": "httpdprovider",
+	"version": "${version}",
+	"name": "MGHttpdProvider",
+	"description": "Shared HTTP server bound to 127.0.0.1:3420 that other client mods register path prefixes on (/ctl for mcctl, /aif for AdvancedInfoFetcher). GET / lists the endpoints that are mounted right now, and the provider stops the server and ends the JVM when the client exits so Minecraft's post-main watchdog never writes a crash report.",
+	"authors": [
+		"MineAgent"
+	],
+	"license": "LGPL-3.0-only",
+	"environment": "client",
+	"entrypoints": {
+		"client": [
+			"com.example.httpd.HttpdProviderMod"
+		]
+	},
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~26.2",
+		"java": ">=25"
+	},
+	"contact": {
+		"homepage": "https://github.com/MineAgent/HttpdProvider",
+		"sources": "https://github.com/MineAgent/HttpdProvider"
+	}
+}

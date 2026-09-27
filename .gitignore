@@ -1,0 +1,65 @@
+# ────────────────────────────────────────────────────────────── Gradle
+.gradle/
+build/
+out/
+
+# ────────────────────────────────────────────── Minecraft dev runs (Loom)
+run/
+runs/
+logs/
+crash-reports/
+screenshots/
+saves/
+resourcepacks/
+shaderpacks/
+options.txt
+optionsof.txt
+usercache.json
+servers.dat
+banned-ips.json
+banned-players.json
+ops.json
+whitelist.json
+eula.txt
+*.log
+*.log.gz
+
+# ────────────────────────────────────────────────────────────── Java
+*.class
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+hs_err_pid*
+replay_pid*
+*.hprof
+
+# ────────────────────────────────────────────────────────────── IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.classpath
+.project
+.factorypath
+nbproject/
+nb-configuration.xml
+*.sln
+*.suo
+
+# ────────────────────────────────────────────────────────────── OS
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+desktop.ini
+*~
+
+# ────────────────────────────────────────────────────────────── misc
+*.tmp
+*.bak
+*.orig
+*.rej
+*.swp
+*.swo
