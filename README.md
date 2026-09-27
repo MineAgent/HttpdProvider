@@ -6,6 +6,7 @@
 | --- | --- | --- |
 | `/ctl` | [mcctl](https://github.com/MineAgent/mcctl) | 控制：按键 / 鼠标 / 视角 / 截图 / Baritone / 聊天 |
 | `/aif` | [AdvancedInfoFetcher](https://github.com/MineAgent/AdvancedInfoFetcher) | 只读状态：坐标 / 背包 / 聊天 / 声音 / 世界 |
+| `/op` | [Craft Command](https://github.com/MineAgent/cmdCraft) | 容器操作：合成 / 快捷栏 / 熔炉 / 箱子 / 转向 |
 
 ```
 GET  :3420/           当前可用的 endpoint 列表（本服务自己提供）
@@ -15,6 +16,8 @@ GET  :3420/ctl/prtsc  当前帧 PNG
 GET  :3420/ctl/mouse  当前光标位置
 GET  :3420/aif/info   玩家状态
 GET  :3420/aif/...    AdvancedInfoFetcher 的其它只读接口
+GET  :3420/op/        Craft Command 使用说明
+POST :3420/op/        执行一条容器操作命令（合成/背包/熔炉/箱子/转向）
 ```
 
 `GET /` 只列出**当前真的挂载了**的 endpoint：没装 mcctl 就不会有 `/ctl` 那几行。
@@ -23,27 +26,199 @@ GET  :3420/aif/...    AdvancedInfoFetcher 的其它只读接口
 curl http://127.0.0.1:3420/
 ```
 
-## 给模组用的 API
+## 如何接入这个 lib（写自己的模组）
 
-模组在自己的 `ClientModInitializer` 里注册一个前缀即可，服务由本模组负责起停：
+一句话：在自己的 `ClientModInitializer` 里调一次 `HttpdProvider.register(...)`，剩下的（起服务、
+路由、`GET /` 索引、关游戏时的清理）都由 provider 负责。下面是完整步骤。
 
-```java
-import com.example.httpd.HttpdProvider;
+### 1. 拿到 API jar
 
-HttpdProvider.register(
-        "/ctl",                                     // 路径前缀
-        "mcctl — 客户端远程控制",                      // GET / 索引里显示的名字
-        List.of(new HttpdProvider.Endpoint("GET", "/ctl/prtsc", "当前帧 PNG")),
-        (exchange, path) -> {                       // path 是去掉前缀后的子路径
-            // path == "/"      -> /ctl 或 /ctl/
-            // path == "/prtsc" -> /ctl/prtsc
-            ...
-        });
+API 只有两个类：`com.example.httpd.HttpdProvider`（注册入口 + `HttpdProvider.Endpoint`）和
+`com.example.httpd.PathHandler`（你要实现的接口）。自己构建 provider：
+
+```bash
+git clone https://github.com/MineAgent/HttpdProvider
+cd HttpdProvider && ./gradlew build
+# -> build/libs/httpdprovider-1.0.jar
 ```
 
-* 只依赖 Fabric Loader，**不需要 Fabric API**；模组 jar 里用 `compileOnly` 依赖本模组的 API。
-* 注册顺序无关紧要：服务在第一次 `register` 时启动，本模组的入口点也会确保它启动。
+把 `httpdprovider-1.0.jar` 复制进你的仓库（惯例是 `libs/`），作为 **`compileOnly`** 依赖 ——
+不要把 provider 打进你的 jar，Fabric Loader 会从 `.minecraft/mods/` 加载真正的那一份。
+
+### 2. build.gradle
+
+```groovy
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // 26.1+ 不混淆，不需要 mappings
+    minecraft "com.mojang:minecraft:26.2"
+    implementation "net.fabricmc:fabric-loader:0.19.5"
+
+    // provider 的 API, 只编译时用
+    compileOnly files('libs/httpdprovider-1.0.jar')
+}
+```
+
+只依赖 Fabric Loader，**不需要 Fabric API**（provider 自己也不需要）。
+
+### 3. fabric.mod.json 里声明依赖
+
+```json
+{
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~26.2",
+		"java": ">=25",
+		"httpdprovider": ">=1.0"
+	}
+}
+```
+
+写上 `httpdprovider` 之后，玩家只装你的模组、没装 provider 时 Fabric Loader 会直接报缺少依赖，
+而不是运行到一半才发现没人监听 3420。
+
+### 4. 入口点里注册一个前缀
+
+一个模组用一个前缀，把前缀 / 名字 / 索引条目做成 endpoint 类的常量（三个现有模组都是这个写法）：
+
+```java
+package com.example.mymod;
+
+import com.example.httpd.HttpdProvider;
+import net.fabricmc.api.ClientModInitializer;
+
+public final class MyMod implements ClientModInitializer {
+	@Override
+	public void onInitializeClient() {
+		HttpdProvider.register(MyEndpoint.PREFIX, MyEndpoint.NAME, MyEndpoint.ENDPOINTS, new MyEndpoint());
+	}
+}
+```
+
+```java
+public static final String PREFIX = "/my";
+public static final String NAME = "MyMod — 一句话说明";
+public static final List<HttpdProvider.Endpoint> ENDPOINTS = List.of(
+		new HttpdProvider.Endpoint("GET", "/my/", "使用说明"),
+		new HttpdProvider.Endpoint("POST", "/my/", "执行命令 (text/plain, UTF-8)"));
+```
+
+* 端口是固定的 `127.0.0.1:3420`，不要自己传端口。
+* 注册顺序无关紧要：服务在第一次 `register` 时启动，provider 的入口点也会确保它启动。
 * `register` 时端口被占用（例如开了两个游戏）只会记一条 SEVERE 日志，不会让游戏崩。
+
+### 5. 实现 PathHandler
+
+```java
+public final class MyEndpoint implements PathHandler {
+	@Override
+	public void handle(HttpExchange exchange, String path) throws IOException {
+		try {
+			if (!"/".equals(path)) {
+				respond(exchange, 404, "no endpoint at /my" + path + "\n\n" + Help.text());
+				return;
+			}
+
+			switch (exchange.getRequestMethod()) {
+				case "GET", "HEAD" -> respond(exchange, 200, Help.text());
+				case "POST" -> handlePost(exchange);
+				case "OPTIONS" -> { /* Allow 头 + 204 */ }
+				default -> { /* Allow 头 + 405 */ }
+			}
+		} catch (Exception e) {
+			LOG.log(Level.WARNING, "request failed", e);
+			respond(exchange, 500, "internal error: " + e + "\n");
+		}
+		// provider 在 handle 返回后关闭 exchange, 这里不要自己 close
+	}
+}
+```
+
+要点：
+
+* `path` 是**去掉你的前缀之后**的子路径，总是以 `/` 开头：请求 `/my` 和 `/my/` 到这里都是 `"/"`，
+  `/my/info` 到这里是 `"/info"`。
+* 每次请求都由你写响应（`sendResponseHeaders` + body）；provider 只负责 `exchange.close()`。
+* 你在 `handle` 里抛异常也不会让服务挂掉：provider 记一条日志并尝试回 500。不过响应头已经发出去时
+  它写不了正文，所以最好还是自己 try/catch。
+
+### 6. 线程规则（最容易踩的坑）
+
+`handle` 跑在 provider 的 HTTP 线程池上（`httpd-http`，daemon），**不是**游戏线程：不能在这里直接
+读游戏状态，更不能碰容器 / GUI。需要 `Minecraft` 状态时，把工作丢到客户端线程，HTTP 线程等结果：
+
+```java
+Minecraft client = Minecraft.getInstance();          // static, 任何线程都能读
+if (client == null) { respond(exchange, 409, "client not running\n"); return; }
+
+CompletableFuture<String> result = new CompletableFuture<>();
+client.execute(() -> {                               // 在客户端(渲染)线程上执行
+	try {
+		result.complete(readGameState());
+	} catch (Throwable t) {
+		result.completeExceptionally(t);
+	}
+});
+
+String body = result.get(3, TimeUnit.SECONDS);       // HTTP 线程阻塞等待
+```
+
+* `Minecraft#isSameThread()` 可以用来兼容"调用方本来就在游戏线程上"的情况。
+* **一定要有超时**：客户端卡住或正在退出时，不能把 HTTP 线程永久挂死（`/aif` 用 3 秒，
+  `/op` 的合成用大约 2 分钟）。
+* 只读快照建议在客户端线程上一口气拼好字符串再回传；增量队列（聊天、声音这类）用 `synchronized`
+  的缓冲区，让 HTTP 线程直接 drain，不必等下一个 tick（见 `/aif` 的 `LineBuffer`）。
+* 需要多个 tick 才完成的任务（例如 `/op` 的合成）不要让 HTTP 线程空转：任务自己记住一个
+  "完成回调 / latch"，由客户端 tick 驱动，完成时唤醒 HTTP 线程。
+
+### 7. 不要自己起服务，也不要自己处理退出
+
+* 服务只有 3420 这一份，由 provider 启动；你自己 `new HttpServer` 只会端口冲突。
+* `com.sun.net.httpserver` 带非 daemon 线程，别的模组（Baritone 等）也会留非 daemon 线程。
+  关游戏时如果不显式结束 JVM，Minecraft 的 post-main 看门狗 15 秒后会写一份
+  `Client shutdown from post-main` 崩溃报告并 `System.exit(-8)`。这段逻辑在 provider 的
+  `ClientExitWatcher` 里，全局只需要一处 —— 你的模组**不要**再装自己的看门狗。
+* 只有确实持有需要释放的资源时（例如 mcctl 按着不放的按键、`/op` 里已经在跑的 tick 任务），
+  才加一个 `Runtime.getRuntime().addShutdownHook(...)` 做清理；正常退出交给 provider。
+
+### 8. 约定与建议
+
+* **前缀**：短、全小写、以 `/` 开头，注意 `TrieMap` 是排好序的，`GET /` 索引按前缀字母序展示。
+* **`GET <前缀>/`**：返回使用说明纯文本 —— 人、脚本、agent 都靠它，务必写。
+* **`POST <前缀>/`**：请求体是纯文本命令（`text/plain; charset=utf-8`），响应正文也用纯文本。
+* **状态码**：`200` 成功、`400` 参数/命令错误、`404` 前缀下没有该路径、`405` 方法不允许、
+  `409` 客户端没启动/没进世界、`413` 请求体过大、`500` 内部错误、`504` 超时。
+  让调用方只看状态码就能分支，正文给人看。
+* **限制请求体**：边读边限长（`/ctl` 用 64KB，`/op` 用 16KB），超了回 `413`。
+* **索引**：`ENDPOINTS` 里列的每一行都会出现在 `GET /` 里，别漏；也别列没实现的路径。
+* **别名路径**：给常用 endpoint 加 `.txt` / 简写别名（如 `/aif/inv`、`/ctl/mouse.txt`）很便宜，
+  手工 curl 时很省事。
+* **不要缓存**：provider 给每个响应加了 `Cache-Control: no-store`，你自己也可以显式设。
+
+### 9. 现有实现可以抄
+
+| 模组 | 前缀 | 入口 / endpoint | 值得参考的地方 |
+| --- | --- | --- | --- |
+| mcctl | `/ctl` | `McCtlClientMod` / `ControlEndpoint` | POST 命令 + JSON 回执、同步等待、PNG 与光标等二进制/只读 GET |
+| AdvancedInfoFetcher | `/aif` | `AdvancedInfoFetchMod` / `InfoEndpoint` | 只读 GET、`CompletableFuture` hop 到客户端线程、增量队列 drain |
+| Craft Command | `/op` | `CraftCmdMod` / `OpEndpoint` | 复用 Brigadier 命令树、异步任务完成后才回响应 |
+
+脱离游戏先验证路由和 `GET /` 索引（不需要 Minecraft）：
+
+```bash
+javac --release 25 -encoding UTF-8 -d /tmp/httpd-verify \
+  src/main/java/com/example/httpd/{HttpdProvider,PathHandler}.java tools/VerifyProvider.java
+java -cp /tmp/httpd-verify VerifyProvider
+curl http://127.0.0.1:3420/           # 索引
+curl http://127.0.0.1:3420/one/echo   # 前缀分发
+curl http://127.0.0.1:3420/two/widgets
+```
+
+（你自己的 endpoint 如果依赖 Minecraft，可以像 mcctl 的 `tools/LoaderSmokeTest.java` 那样，
+用真实的 Minecraft 运行时 classpath 起一个"没有游戏"的 JVM 来加载入口点并 curl。）
 
 ## 退出时不再写崩溃报告
 
@@ -69,17 +244,18 @@ JVM 根本没开始关闭，钩子不会执行。
 ./gradlew build      # 产物: build/libs/httpdprovider-1.0.jar
 ```
 
-把 jar 放进 `.minecraft/mods/`，再放上要用的模组（mcctl / AdvancedInfoFetcher）。
+把 jar 放进 `.minecraft/mods/`，再放上要用的模组（mcctl / AdvancedInfoFetcher / Craft Command）。
 启动后日志里会有：
 
 ```
 MGHttpdProvider listening on http://127.0.0.1:3420
-registered /ctl (mcctl — 客户端远程控制 (按键/鼠标/视角/截图/Baritone))
 registered /aif (AdvancedInfoFetcher — 只读状态 (坐标/背包/聊天/声音/世界))
+registered /ctl (mcctl — 客户端远程控制 (按键/鼠标/视角/截图/Baritone))
+registered /op (Craft Command — 客户端容器操作 (合成/背包/熔炉/箱子/转向))
 ```
 
-mcctl 和 AdvancedInfoFetcher 通过 `fabric.mod.json` 的 `depends` 依赖本模组（`httpdprovider >= 1.0`），
-只装它们、不装本模组时 Fabric Loader 会直接报缺少依赖。
+mcctl、AdvancedInfoFetcher 和 Craft Command 都通过 `fabric.mod.json` 的 `depends` 依赖本模组
+（`httpdprovider >= 1.0`），只装它们、不装本模组时 Fabric Loader 会直接报缺少依赖。
 
 ## 目录
 
