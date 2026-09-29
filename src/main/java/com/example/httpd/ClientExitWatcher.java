@@ -4,9 +4,8 @@
 package com.example.httpd;
 
 import net.minecraft.client.Minecraft;
-
-import java.util.logging.Level;
-import java.util.logging.Logger;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 /**
  * Runs an action as soon as the Minecraft client has exited, then ends the JVM.
@@ -29,7 +28,7 @@ import java.util.logging.Logger;
  * (Minecraft's own included), so this only skips the watchdog.</p>
  */
 public final class ClientExitWatcher {
-	private static final Logger LOG = Logger.getLogger("httpd");
+	private static final Logger LOG = LogManager.getLogger("httpd");
 
 	/** How often to look for a running client while the game is still starting up. */
 	private static final long POLL_MS = 100L;
@@ -61,7 +60,7 @@ public final class ClientExitWatcher {
 		Thread watcher = new Thread(() -> {
 			try {
 				Thread client = awaitClientThread();
-				LOG.fine("watching client thread " + client.getName() + " for exit");
+				LOG.debug("watching client thread " + client.getName() + " for exit");
 				client.join();
 			} catch (InterruptedException e) {
 				Thread.currentThread().interrupt();
@@ -72,7 +71,7 @@ public final class ClientExitWatcher {
 			try {
 				onExit.run();
 			} catch (Throwable t) {
-				LOG.log(Level.WARNING, "teardown after client exit failed", t);
+				LOG.warn("teardown after client exit failed", t);
 			}
 
 			if (shuttingDown) {

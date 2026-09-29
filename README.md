@@ -167,6 +167,9 @@ public final class MyEndpoint implements PathHandler {
 
 * `path` 是**去掉你的前缀之后**的子路径，总是以 `/` 开头：请求 `/my` 和 `/my/` 到这里都是 `"/"`，
   `/my/info` 到这里是 `"/info"`。
+* **前缀按路径边界匹配**：只有 `/my` 本身和 `/my/...` 会到你这里。`/myinfo` **不是** `/my` 下的路径，
+  provider 直接回 `404`，不会把它切成 `/info` 交给你。（`HttpServer` 的 context 匹配是裸字符串前缀，
+  1.1.1 起 provider 在分发前自己挡掉了这种请求；别指望靠意外拼写兜住 endpoint。）
 * 每次请求都由你写响应（`sendResponseHeaders` + body）；provider 只负责 `exchange.close()`。
 * 你在 `handle` 里抛异常也不会让服务挂掉：provider 记一条日志并尝试回 500。不过响应头已经发出去时
   它写不了正文，所以最好还是自己 try/catch。
@@ -222,7 +225,8 @@ String body = result.get(3, TimeUnit.SECONDS);       // HTTP 线程阻塞等待
 * **索引**：`ENDPOINTS` 里列的每一行都会出现在 `GET /` 里，别漏；也别列没实现的路径。
 * **别名路径**：给常用 endpoint 加 `.txt` / 简写别名（如 `/aif/inv`、`/ctl/mouse.txt`）很便宜，
   手工 curl 时很省事。
-* **不要缓存**：provider 给每个响应加了 `Cache-Control: no-store`，你自己也可以显式设。
+* **不要缓存**：provider 在把请求交给 handler **之前**就设好 `Cache-Control: no-store`，所以每个响应
+  （包括 `404` / `405` 这些它自己回的）都带；你自己再设一遍也无害。
 
 ### 9. 现有实现可以抄
 
@@ -232,23 +236,27 @@ String body = result.get(3, TimeUnit.SECONDS);       // HTTP 线程阻塞等待
 | AdvancedInfoFetcher | `/aif` | `AdvancedInfoFetchMod` / `InfoEndpoint` | 只读 GET、`CompletableFuture` hop 到客户端线程、增量队列 drain |
 | Craft Command | `/op` | `CraftCmdMod` / `OpEndpoint` | 复用 Brigadier 命令树、异步任务完成后才回响应 |
 
-脱离游戏先验证路由和 `GET /` 索引（不需要 Minecraft）：
+脱离游戏先验证路由、索引和前缀边界（不需要 Minecraft）：
 
 ```bash
-javac --release 25 -encoding UTF-8 -d /tmp/httpd-verify \
+# provider 用 log4j2 记日志；脱离游戏跑时把 Minecraft 自带的那份 log4j-api 放进 classpath 即可
+# （没有 log4j-core，log4j 会退回到 SimpleLogger，stderr 上有一行
+#  "Log4j API could not find a logging provider." 属正常，provider 那几行不打印，
+#  但下面这些结果照常在 stdout）。
+LOG4J_API=$(ls ~/.minecraft/libraries/org/apache/logging/log4j/log4j-api/*/log4j-api-*.jar | head -1)
+
+javac --release 25 -encoding UTF-8 -cp "$LOG4J_API" -d /tmp/httpd-verify \
   src/main/java/com/example/httpd/{HttpdProvider,PathHandler}.java tools/VerifyProvider.java
-java -cp /tmp/httpd-verify VerifyProvider
-curl http://127.0.0.1:3420/           # 索引
-curl http://127.0.0.1:3420/one/echo   # 前缀分发
-curl http://127.0.0.1:3420/two/widgets
+java -cp "/tmp/httpd-verify:$LOG4J_API" VerifyProvider          # 自检，全过才退 0
+java -cp "/tmp/httpd-verify:$LOG4J_API" VerifyProvider --serve  # 保持服务，手动 curl
 ```
 
 退出（看门狗）也能脱离游戏验证：
 
 ```bash
-javac --release 25 -encoding UTF-8 -d /tmp/httpd-verify \
+javac --release 25 -encoding UTF-8 -cp "$LOG4J_API" -d /tmp/httpd-verify \
   src/main/java/com/example/httpd/{HttpdProvider,PathHandler}.java tools/VerifyExit.java
-java -cp /tmp/httpd-verify VerifyExit
+java -cp "/tmp/httpd-verify:$LOG4J_API" VerifyExit
 ```
 
 （你自己的 endpoint 如果依赖 Minecraft，可以像 mcctl 的 `tools/LoaderSmokeTest.java` 那样，
@@ -304,21 +312,29 @@ java -cp /tmp/httpd-verify VerifyExit     # 全部 ok 才退 0
 需要 JDK 25（Minecraft 26.2 要求）。26.1 起官方代码不再混淆，所以 Loom 不需要 mappings 配置。
 
 ```bash
-./gradlew build      # 产物: build/libs/httpdprovider-1.1.0.jar
+./gradlew build      # 产物: build/libs/httpdprovider-1.1.1.jar
 ```
 
 把 jar 放进 `.minecraft/mods/`，再放上要用的模组（mcctl / AdvancedInfoFetcher / Craft Command）。
 启动后日志里会有：
 
 ```
-MGHttpdProvider listening on http://127.0.0.1:3420
-registered /aif (AdvancedInfoFetcher — 只读状态 (坐标/背包/聊天/声音/世界))
-registered /ctl (mcctl — 客户端远程控制 (按键/鼠标/视角/截图/Baritone))
-registered /op (Craft Command — 客户端容器操作 (合成/背包/熔炉/箱子/转向))
-window title is now "Minecraft* 26.2 - 3420"
+[00:20:14] [Render thread/INFO]: MGHttpdProvider listening on http://127.0.0.1:3420
+[00:20:14] [Render thread/INFO]: registered /aif (AdvancedInfoFetcher — 只读状态 (坐标/背包/聊天/声音/世界))
+[00:20:14] [Render thread/INFO]: registered /ctl (mcctl — 客户端远程控制 (按键/鼠标/视角/截图/Baritone))
+[00:20:14] [Render thread/INFO]: registered /op (Craft Command — 客户端容器操作 (合成/背包/熔炉/箱子/转向))
+[00:20:18] [Render thread/INFO]: window title is now "Minecraft* 26.2 - 3420"
 ```
 
 最后一行是 1.1.0 加的，它读回来的正是交给 GLFW 的那份标题。
+
+### 日志去哪了
+
+provider 用游戏自带的 log4j2（`LogManager.getLogger("httpd")`；log4j-api 随 Minecraft 一起来，
+`build.gradle` 不用加依赖），所以这几行经过 Minecraft 的根 logger，**同时进控制台 stdout 和
+`logs/latest.log`**。1.1.0 及以前用的是 `java.util.logging`：它的默认 handler 只写 stderr，又不经过
+log4j，于是控制台和 latest.log 里都看不到"到底注册了哪几个前缀"——排查"模组挂上没有"时很别扭，
+1.1.1 换掉了。
 
 mcctl、AdvancedInfoFetcher 和 Craft Command 都通过 `fabric.mod.json` 的 `depends` 依赖本模组
 （`httpdprovider >= 1.0`），只装它们、不装本模组时 Fabric Loader 会直接报缺少依赖。
@@ -336,27 +352,30 @@ src/main/java/com/example/httpd/
 src/main/resources/
   fabric.mod.json         模组元数据 (entrypoints / mixins / depends)
   httpdprovider.mixins.json   Mixin 配置 (client 侧 WindowTitleMixin)
-tools/VerifyProvider.java 脱离游戏验证路由 + 索引 (两个假前缀)
+tools/VerifyProvider.java 脱离游戏自检路由/索引/前缀边界/no-store (--serve 可手动 curl)
 tools/VerifyExit.java     脱离游戏验证退出/看门狗 (线程 daemon 属性 + teardown)
 ```
 
 脱离游戏验证路由层（不需要 Minecraft，退出监听只在入口点里碰）：
 
 ```bash
-javac --release 25 -encoding UTF-8 -d /tmp/httpd-verify \
+LOG4J_API=$(ls ~/.minecraft/libraries/org/apache/logging/log4j/log4j-api/*/log4j-api-*.jar | head -1)
+
+javac --release 25 -encoding UTF-8 -cp "$LOG4J_API" -d /tmp/httpd-verify \
   src/main/java/com/example/httpd/{HttpdProvider,PathHandler}.java tools/VerifyProvider.java
-java -cp /tmp/httpd-verify VerifyProvider
+java -cp "/tmp/httpd-verify:$LOG4J_API" VerifyProvider          # 自检路由/索引/前缀边界/no-store
+java -cp "/tmp/httpd-verify:$LOG4J_API" VerifyProvider --serve  # 保持服务，手动 curl
 curl http://127.0.0.1:3420/           # 索引
 curl http://127.0.0.1:3420/one/echo   # 前缀分发
-curl http://127.0.0.1:3420/two/widgets
+curl http://127.0.0.1:3420/oneside    # 404：/one 的兄弟路径不属于 /one
 ```
 
 退出（看门狗）也能脱离游戏验证：
 
 ```bash
-javac --release 25 -encoding UTF-8 -d /tmp/httpd-verify \
+javac --release 25 -encoding UTF-8 -cp "$LOG4J_API" -d /tmp/httpd-verify \
   src/main/java/com/example/httpd/{HttpdProvider,PathHandler}.java tools/VerifyExit.java
-java -cp /tmp/httpd-verify VerifyExit
+java -cp "/tmp/httpd-verify:$LOG4J_API" VerifyExit
 ```
 
 ## 安全说明
@@ -366,6 +385,14 @@ java -cp /tmp/httpd-verify VerifyExit
 
 ## 版本
 
+* **1.1.1** — 三处"代码和文档/直觉不一致"的地方。① `dispatch` 在交给 handler 前统一设
+  `Cache-Control: no-store`：1.1.0 其实只有 provider 自己的响应带，模组自己写的响应没有（README
+  却承诺了）；② 前缀改成**按路径边界匹配**：`HttpServer` 的 context 是裸字符串前缀匹配，`/aifinfo`
+  会被塞进 `/aif` 再切成 `/info`，等于用一个意外拼写调通了 `/aif/info`——现在直接 `404`；③ 日志从
+  `java.util.logging`（只写 stderr、进不了 latest.log）换成游戏自带的 log4j2，注册 / 监听 / 标题
+  这几行**同时进 stdout 和 `logs/latest.log`**。注册与路由 API 未变，依赖方（`depends httpdprovider
+  >= 1.0`）照旧可用，不必重新 vendored 那个 compileOnly jar。`tools/VerifyProvider.java` 也从
+  "起服务等 curl" 变成自检 + `--serve`。
 * **1.1.0** — 窗口标题带上端口：服务正常起来后标题追加 ` - 3420`，一眼看出哪个实例在提供
   `127.0.0.1:3420`。用 GLFW + 一个 `Window#setTitle` 的 Mixin 实现，**没有平台分支**，也不需要
   Fabric API；端口没绑上（第二个实例）时标题不动。`HttpdProvider.isRunning()` 变成 public，

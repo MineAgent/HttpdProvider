@@ -37,9 +37,10 @@ import java.util.stream.Collectors;
  * </ol>
  *
  * <pre>
- * javac --release 25 -encoding UTF-8 -d /tmp/httpd-verify \
+ * LOG4J_API=~/.minecraft/libraries/org/apache/logging/log4j/log4j-api/2.26.0/log4j-api-2.26.0.jar
+ * javac --release 25 -encoding UTF-8 -cp "$LOG4J_API" -d /tmp/httpd-verify \
  *   src/main/java/com/example/httpd/{HttpdProvider,PathHandler}.java tools/VerifyExit.java
- * java -cp /tmp/httpd-verify VerifyExit
+ * java -cp "/tmp/httpd-verify:$LOG4J_API" VerifyExit
  * </pre>
  */
 public final class VerifyExit {

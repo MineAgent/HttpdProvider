@@ -5,10 +5,9 @@ package com.example.httpd;
 
 import com.mojang.blaze3d.platform.Window;
 import net.minecraft.client.Minecraft;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.lwjgl.glfw.GLFW;
-
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
 /**
  * Appends the HTTP port to the game window title while the provider is listening, so a client
@@ -26,7 +25,7 @@ import java.util.logging.Logger;
  * false and the title is left completely alone.</p>
  */
 public final class WindowTitle {
-	private static final Logger LOG = Logger.getLogger("httpd");
+	private static final Logger LOG = LogManager.getLogger("httpd");
 
 	/** Appended to whatever title the game computes, for example {@code Minecraft 26.2 - 3420}. */
 	public static final String SUFFIX = " - " + HttpdProvider.PORT;
@@ -84,7 +83,7 @@ public final class WindowTitle {
 			LOG.info("window title is now \"" + GLFW.glfwGetWindowTitle(window.handle()) + "\"");
 		} catch (Throwable t) {
 			// A cosmetic extra must never keep the game from starting.
-			LOG.log(Level.WARNING, "could not append the port to the window title", t);
+			LOG.warn("could not append the port to the window title", t);
 		}
 	}
 }

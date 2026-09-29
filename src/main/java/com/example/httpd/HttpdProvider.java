@@ -5,6 +5,8 @@ package com.example.httpd;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -16,8 +18,6 @@ import java.util.Objects;
 import java.util.TreeMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
 /**
  * Shared HTTP server bound to {@code 127.0.0.1:3420}.
@@ -29,12 +29,15 @@ import java.util.logging.Logger;
  *
  * <p>Registration is order independent: the server is started lazily by {@link #register} as well
  * as by the mod's own entrypoint, so it does not matter which mod's entrypoint runs first.</p>
+ *
+ * <p>Requests are matched on path boundaries: {@code /aif} owns {@code /aif} and everything below
+ * it, but not {@code /aifinfo}.</p>
  */
 public final class HttpdProvider {
 	public static final String HOST = "127.0.0.1";
 	public static final int PORT = 3420;
 
-	private static final Logger LOG = Logger.getLogger("httpd");
+	private static final Logger LOG = LogManager.getLogger("httpd");
 
 	private static final Map<String, Registration> REGISTRATIONS = new TreeMap<>();
 
@@ -111,7 +114,7 @@ public final class HttpdProvider {
 		} catch (IOException e) {
 			server = null;
 			failed = true;
-			LOG.log(Level.SEVERE, "MGHttpdProvider could not bind to " + HOST + ":" + PORT
+			LOG.error("MGHttpdProvider could not bind to " + HOST + ":" + PORT
 					+ " - is another instance already running?", e);
 			return false;
 		}
@@ -155,20 +158,34 @@ public final class HttpdProvider {
 		return normalized;
 	}
 
-	/** Strips the prefix and hands the request to the mod that registered it. */
+	/**
+	 * Strips the prefix and hands the request to the mod that registered it.
+	 *
+	 * <p>{@code HttpServer} picks a context by raw string prefix, so without the boundary check a
+	 * request to {@code /aifinfo} would land in the {@code /aif} handler and be sliced into
+	 * {@code /info} — answering another mod's endpoint by accident. Only the prefix itself and paths
+	 * below it belong to a mod; anything else is answered here instead of being handed on.</p>
+	 */
 	private static void dispatch(Registration registration, HttpExchange exchange) {
-		String requestPath = exchange.getRequestURI().getPath();
-		String path = requestPath.length() <= registration.prefix().length()
-				? "/"
-				: requestPath.substring(registration.prefix().length());
-		if (!path.startsWith("/")) {
-			path = "/" + path;
-		}
-
 		try {
+			String requestPath = exchange.getRequestURI().getPath();
+
+			// Promised for every response the server sends, including the ones a mod writes itself:
+			// handlers never go through respond(), so this has to be set before they run.
+			exchange.getResponseHeaders().set("Cache-Control", "no-store");
+
+			if (!isBelowPrefix(requestPath, registration.prefix())) {
+				respond(exchange, 404, "text/plain; charset=utf-8",
+						"no endpoint at " + requestPath + "\n\n" + index());
+				return;
+			}
+
+			String path = requestPath.equals(registration.prefix())
+					? "/"
+					: requestPath.substring(registration.prefix().length());
 			registration.handler().handle(exchange, path);
 		} catch (Exception e) {
-			LOG.log(Level.WARNING, "endpoint " + registration.prefix() + " failed", e);
+			LOG.warn("endpoint " + registration.prefix() + " failed", e);
 			try {
 				respond(exchange, 500, "text/plain; charset=utf-8", "internal error: " + e + "\n");
 			} catch (IOException ignored) {
@@ -177,6 +194,15 @@ public final class HttpdProvider {
 		} finally {
 			exchange.close();
 		}
+	}
+
+	/**
+	 * @return true when {@code requestPath} is the prefix itself or a path below it, i.e. when the
+	 *         prefix is followed by {@code /} or by nothing. {@code /aifinfo} is not below
+	 *         {@code /aif}; {@code /aif/info} is.
+	 */
+	private static boolean isBelowPrefix(String requestPath, String prefix) {
+		return requestPath.equals(prefix) || requestPath.startsWith(prefix + "/");
 	}
 
 	/** {@code GET /}: the index of everything that is mounted right now. */
