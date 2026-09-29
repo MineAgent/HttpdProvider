@@ -34,6 +34,13 @@ public final class ClientExitWatcher {
 	/** How often to look for a running client while the game is still starting up. */
 	private static final long POLL_MS = 100L;
 
+	/**
+	 * Set by {@link #onClientExit}'s shutdown hook. When a shutdown is already under way (a crash
+	 * calling {@code System.exit}, SIGTERM, ...) the watcher must not start its own exit: the JVM is
+	 * going down anyway, and racing it could overwrite the exit code of the failure that caused it.
+	 */
+	private static volatile boolean shuttingDown;
+
 	private ClientExitWatcher() {
 	}
 
@@ -41,8 +48,16 @@ public final class ClientExitWatcher {
 	 * Starts a daemon watcher: after the client thread has stopped, {@code onExit} runs once on the
 	 * watcher thread (never on the render thread, which is already gone by then) and the JVM is
 	 * then terminated.
+	 *
+	 * <p>Installing this must not depend on anything else having succeeded (binding the HTTP port,
+	 * for instance): the post-main watchdog fires whenever <em>any</em> non-daemon thread is left
+	 * behind, and this mod is not the only source of those.</p>
 	 */
 	public static void onClientExit(Runnable onExit) {
+		// A real shutdown (crash, SIGTERM, System.exit) runs the hooks: remember that so the watcher
+		// below leaves its exit code alone.
+		Runtime.getRuntime().addShutdownHook(new Thread(() -> shuttingDown = true, "httpd-exit-guard"));
+
 		Thread watcher = new Thread(() -> {
 			try {
 				Thread client = awaitClientThread();
@@ -58,6 +73,11 @@ public final class ClientExitWatcher {
 				onExit.run();
 			} catch (Throwable t) {
 				LOG.log(Level.WARNING, "teardown after client exit failed", t);
+			}
+
+			if (shuttingDown) {
+				LOG.info("a JVM shutdown is already in progress, leaving its exit code alone");
+				return;
 			}
 
 			// Nothing of the game is left to do, and waiting for other mods' non-daemon threads

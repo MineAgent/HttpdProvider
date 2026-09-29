@@ -39,10 +39,10 @@ API 只有两个类：`com.example.httpd.HttpdProvider`（注册入口 + `HttpdP
 ```bash
 git clone https://github.com/MineAgent/HttpdProvider
 cd HttpdProvider && ./gradlew build
-# -> build/libs/httpdprovider-1.0.jar
+# -> build/libs/httpdprovider-1.0.1.jar
 ```
 
-把 `httpdprovider-1.0.jar` 复制进你的仓库（惯例是 `libs/`），作为 **`compileOnly`** 依赖 ——
+把 `httpdprovider-1.0.1.jar` 复制进你的仓库（惯例是 `libs/`），作为 **`compileOnly`** 依赖 ——
 不要把 provider 打进你的 jar，Fabric Loader 会从 `.minecraft/mods/` 加载真正的那一份。
 
 ### 2. build.gradle
@@ -58,7 +58,7 @@ dependencies {
     implementation "net.fabricmc:fabric-loader:0.19.5"
 
     // provider 的 API, 只编译时用
-    compileOnly files('libs/httpdprovider-1.0.jar')
+    compileOnly files('libs/httpdprovider-1.0.1.jar')
 }
 ```
 
@@ -217,6 +217,14 @@ curl http://127.0.0.1:3420/one/echo   # 前缀分发
 curl http://127.0.0.1:3420/two/widgets
 ```
 
+退出（看门狗）也能脱离游戏验证：
+
+```bash
+javac --release 25 -encoding UTF-8 -d /tmp/httpd-verify \
+  src/main/java/com/example/httpd/{HttpdProvider,PathHandler}.java tools/VerifyExit.java
+java -cp /tmp/httpd-verify VerifyExit
+```
+
 （你自己的 endpoint 如果依赖 Minecraft，可以像 mcctl 的 `tools/LoaderSmokeTest.java` 那样，
 用真实的 Minecraft 运行时 classpath 起一个"没有游戏"的 JVM 来加载入口点并 curl。）
 
@@ -233,15 +241,44 @@ JVM 根本没开始关闭，钩子不会执行。
 所以看门狗永远不会触发；这时世界早已保存、窗口早已关闭（`exitWorldAndClose()` 在 `main()` 返回前就跑完了），
 强制退出不会丢存档。因为服务只有这一个，这段逻辑也就只需要一处。
 
-实测（Minecraft 26.2 + Baritone + AdvancedInfoFetcher，关窗口后）：进程退出码 `0`，
-`crash-reports/` 不新增文件；改之前 15 秒后必现 `Client shutdown from post-main`（退出码 `-8`）。
+1.0.1 起还有两处细节：
+
+* **退出处理不依赖端口绑定成功**：`ClientExitWatcher.onClientExit(...)` 与关闭钩子在 `HttpdProvider.start()`
+  **之前**安装，端口被占用（第二个游戏实例）时也照常生效——那种情况下本模组自己没有服务，但「JVM 退不掉」
+  是**别的模组**的非 daemon 线程造成的（Baritone 的 worker pool），看门狗照样会开火。
+  `HttpdProvider::stop` 是幂等的，服务没起来时 teardown 什么也不做。
+* **不掩盖真正的失败**：如果 JVM 已经在关闭中（崩溃、`SIGTERM` 等会执行关闭钩子），守候线程只做 teardown，
+  不再 `System.exit`，以免把那次失败的退出码覆盖成 `0`。
+
+实测（Minecraft 26.2 + Baritone，关窗口后）：
+
+| 场景 | 退出码 | `crash-reports/` |
+| --- | --- | --- |
+| 正常（端口空闲），1.0 及以前 | `0` | 不新增 |
+| 端口被占用，**1.0** | **`-8`** | **新增 `Client shutdown from post-main`** |
+| 端口被占用，**1.0.1** | `0` | 不新增 |
+
+（端口被占用用 `TestSave.sh` 启动前先占住 `127.0.0.1:3420` 复现；`mods/` 里放了 Baritone。
+1.0.1 那次日志是 `client exited, stopping the HTTP server` → `exiting the JVM so the post-main shutdown
+watchdog cannot fire`。）
+
+不需要启动客户端也能验证这套线程逻辑（`tools/VerifyExit.java`）：
+
+```bash
+javac --release 25 -encoding UTF-8 -d /tmp/httpd-verify \
+  src/main/java/com/example/httpd/{HttpdProvider,PathHandler}.java tools/VerifyExit.java
+java -cp /tmp/httpd-verify VerifyExit     # 全部 ok 才退 0
+```
+
+它检查：JDK 确实会留下非 daemon 的 `HTTP-Dispatcher` 线程（危险是真的）、provider 自己的线程池是 daemon、
+`HttpdProvider.stop()` 能消掉那个非 daemon 线程且可重复调用、服务没起来时 `stop()` 也无害。
 
 ## 构建 / 安装
 
 需要 JDK 25（Minecraft 26.2 要求）。26.1 起官方代码不再混淆，所以 Loom 不需要 mappings 配置。
 
 ```bash
-./gradlew build      # 产物: build/libs/httpdprovider-1.0.jar
+./gradlew build      # 产物: build/libs/httpdprovider-1.0.1.jar
 ```
 
 把 jar 放进 `.minecraft/mods/`，再放上要用的模组（mcctl / AdvancedInfoFetcher / Craft Command）。
@@ -266,6 +303,7 @@ src/main/java/com/example/httpd/
   PathHandler.java        模组实现的接口 (exchange, 去掉前缀的子路径)
   ClientExitWatcher.java  守候渲染线程, 客户端退出后停服务并结束 JVM
 tools/VerifyProvider.java 脱离游戏验证路由 + 索引 (两个假前缀)
+tools/VerifyExit.java     脱离游戏验证退出/看门狗 (线程 daemon 属性 + teardown)
 ```
 
 脱离游戏验证路由层（不需要 Minecraft，退出监听只在入口点里碰）：
@@ -279,10 +317,27 @@ curl http://127.0.0.1:3420/one/echo   # 前缀分发
 curl http://127.0.0.1:3420/two/widgets
 ```
 
+退出（看门狗）也能脱离游戏验证：
+
+```bash
+javac --release 25 -encoding UTF-8 -d /tmp/httpd-verify \
+  src/main/java/com/example/httpd/{HttpdProvider,PathHandler}.java tools/VerifyExit.java
+java -cp /tmp/httpd-verify VerifyExit
+```
+
 ## 安全说明
 
 服务只绑定 `127.0.0.1`，仅本机可访问；没有鉴权（本机任何时候都能控制游戏），
 如果不需要请删除模组或关闭游戏。
+
+## 版本
+
+* **1.0.1** — 退出处理的两处加固：在 `start()` 之前安装（端口被占用也能干净退出，1.0 时会写
+  `Client shutdown from post-main` 崩溃报告并 `System.exit(-8)`）；已经在关闭中时不再抢着
+  `System.exit`，不覆盖真正的失败退出码。新增脱离游戏的 `tools/VerifyExit.java`。API 未变，
+  依赖方（`depends httpdprovider >= 1.0`）照旧可用，不必重新 vendored 那个 compileOnly jar。
+* **1.0** — 第一个版本：`127.0.0.1:3420` 上的共享 HTTP 服务、前缀路由、`GET /` 索引、
+  `ClientExitWatcher` 退出处理。
 
 ## 许可证
 
