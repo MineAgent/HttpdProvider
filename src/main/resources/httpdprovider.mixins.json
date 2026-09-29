@@ -1,0 +1,12 @@
+{
+	"required": true,
+	"minVersion": "0.8",
+	"package": "com.example.httpd.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"client": [
+		"WindowTitleMixin"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	}
+}

@@ -26,6 +26,31 @@ POST :3420/op/        执行一条容器操作命令（合成/背包/熔炉/箱�
 curl http://127.0.0.1:3420/
 ```
 
+## 窗口标题里的端口（1.1.0）
+
+服务正常起来后，游戏窗口标题会被追加 ` - 3420`：
+
+```
+Minecraft* 26.2 - 3420
+```
+
+这样一眼就能看出这个实例是不是**这一个**在提供 `127.0.0.1:3420`：端口被别的实例占着、本模组没起来时，
+标题原样不动（`HttpdProvider.isRunning()` 为 false，`WindowTitle.decorate` 直接返回原字符串）。
+多开时只有真正绑到端口的那一个带后缀，另一个实例看着自己的日志就知道是被占了。
+
+实现上**没有任何平台分支**，也不需要 Fabric API：
+
+* 写标题走的是 GLFW（`GLFW.glfwSetWindowTitle`，LWJGL 随 Minecraft 一起发布），
+  Linux / Windows / macOS 都是同一份代码——不碰 `user32!SetWindowText`，也不碰 X11/Wayland。
+* 光调用一次不够：Minecraft 每次进出世界都会重新算一遍标题（`Minecraft#updateTitle` → `Window#setTitle`），
+  会把后缀盖掉。所以用一个 Mixin（`com.example.httpd.mixin.WindowTitleMixin`，
+  Mixin 由 Fabric Loader 自带）在 `Window#setTitle` 的参数上做一次改写：**所有**标题设置都从这里过，
+  后缀不会被覆盖，重复设置也不会叠加（已经以 `" - 3420"` 结尾就不再追加）。
+* 窗口标题在入口点**之前**就算好了，窗口也是用它创建的（入口点跑在 `Minecraft` 构造器里，那时窗口还不存在），
+  所以 `start()` 成功后会把一次 `updateTitle()` 排到渲染线程上（`WindowTitle.refresh()` → `Minecraft#execute`），
+  在第一个 tick、窗口已经有时执行：标题界面就带后缀，不用等进世界。GLFW 要求窗口函数在主线程调用，
+  这样也顺带满足了。
+
 ## 如何接入这个 lib（写自己的模组）
 
 一句话：在自己的 `ClientModInitializer` 里调一次 `HttpdProvider.register(...)`，剩下的（起服务、
@@ -34,15 +59,16 @@ curl http://127.0.0.1:3420/
 ### 1. 拿到 API jar
 
 API 只有两个类：`com.example.httpd.HttpdProvider`（注册入口 + `HttpdProvider.Endpoint`）和
-`com.example.httpd.PathHandler`（你要实现的接口）。自己构建 provider：
+`com.example.httpd.PathHandler`（你要实现的接口）。1.1.0 起 `HttpdProvider.isRunning()` 是 public 的
+（服务是否正在监听；窗口标题那段逻辑用它判断要不要加后缀），注册与路由 API 未变。自己构建 provider：
 
 ```bash
 git clone https://github.com/MineAgent/HttpdProvider
 cd HttpdProvider && ./gradlew build
-# -> build/libs/httpdprovider-1.0.1.jar
+# -> build/libs/httpdprovider-1.1.0.jar
 ```
 
-把 `httpdprovider-1.0.1.jar` 复制进你的仓库（惯例是 `libs/`），作为 **`compileOnly`** 依赖 ——
+把 `httpdprovider-1.1.0.jar` 复制进你的仓库（惯例是 `libs/`），作为 **`compileOnly`** 依赖 ——
 不要把 provider 打进你的 jar，Fabric Loader 会从 `.minecraft/mods/` 加载真正的那一份。
 
 ### 2. build.gradle
@@ -278,7 +304,7 @@ java -cp /tmp/httpd-verify VerifyExit     # 全部 ok 才退 0
 需要 JDK 25（Minecraft 26.2 要求）。26.1 起官方代码不再混淆，所以 Loom 不需要 mappings 配置。
 
 ```bash
-./gradlew build      # 产物: build/libs/httpdprovider-1.0.1.jar
+./gradlew build      # 产物: build/libs/httpdprovider-1.1.0.jar
 ```
 
 把 jar 放进 `.minecraft/mods/`，再放上要用的模组（mcctl / AdvancedInfoFetcher / Craft Command）。
@@ -289,7 +315,10 @@ MGHttpdProvider listening on http://127.0.0.1:3420
 registered /aif (AdvancedInfoFetcher — 只读状态 (坐标/背包/聊天/声音/世界))
 registered /ctl (mcctl — 客户端远程控制 (按键/鼠标/视角/截图/Baritone))
 registered /op (Craft Command — 客户端容器操作 (合成/背包/熔炉/箱子/转向))
+window title is now "Minecraft* 26.2 - 3420"
 ```
+
+最后一行是 1.1.0 加的，它读回来的正是交给 GLFW 的那份标题。
 
 mcctl、AdvancedInfoFetcher 和 Craft Command 都通过 `fabric.mod.json` 的 `depends` 依赖本模组
 （`httpdprovider >= 1.0`），只装它们、不装本模组时 Fabric Loader 会直接报缺少依赖。
@@ -298,10 +327,15 @@ mcctl、AdvancedInfoFetcher 和 Craft Command 都通过 `fabric.mod.json` 的 `d
 
 ```
 src/main/java/com/example/httpd/
-  HttpdProviderMod.java   Fabric 客户端入口, 启动服务 + 装上退出处理
-  HttpdProvider.java      服务 / 前缀路由 / GET / 索引 / 注册 API
+  HttpdProviderMod.java   Fabric 客户端入口, 启动服务 + 装上退出处理 (+ 窗口标题后缀)
+  HttpdProvider.java      服务 / 前缀路由 / GET / 索引 / 注册 API / isRunning()
   PathHandler.java        模组实现的接口 (exchange, 去掉前缀的子路径)
   ClientExitWatcher.java  守候渲染线程, 客户端退出后停服务并结束 JVM
+  WindowTitle.java        窗口标题后缀 (GLFW, 无平台分支) + 启动后刷一次标题
+  mixin/WindowTitleMixin.java  Window#setTitle 的参数改写 (标题每次变化都带上后缀)
+src/main/resources/
+  fabric.mod.json         模组元数据 (entrypoints / mixins / depends)
+  httpdprovider.mixins.json   Mixin 配置 (client 侧 WindowTitleMixin)
 tools/VerifyProvider.java 脱离游戏验证路由 + 索引 (两个假前缀)
 tools/VerifyExit.java     脱离游戏验证退出/看门狗 (线程 daemon 属性 + teardown)
 ```
@@ -332,6 +366,10 @@ java -cp /tmp/httpd-verify VerifyExit
 
 ## 版本
 
+* **1.1.0** — 窗口标题带上端口：服务正常起来后标题追加 ` - 3420`，一眼看出哪个实例在提供
+  `127.0.0.1:3420`。用 GLFW + 一个 `Window#setTitle` 的 Mixin 实现，**没有平台分支**，也不需要
+  Fabric API；端口没绑上（第二个实例）时标题不动。`HttpdProvider.isRunning()` 变成 public，
+  注册 / 路由 API 未变，依赖方（`depends httpdprovider >= 1.0`）照旧可用。
 * **1.0.1** — 退出处理的两处加固：在 `start()` 之前安装（端口被占用也能干净退出，1.0 时会写
   `Client shutdown from post-main` 崩溃报告并 `System.exit(-8)`）；已经在关闭中时不再抢着
   `System.exit`，不覆盖真正的失败退出码。新增脱离游戏的 `tools/VerifyExit.java`。API 未变，

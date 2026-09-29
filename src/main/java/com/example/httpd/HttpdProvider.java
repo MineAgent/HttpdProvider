@@ -117,6 +117,15 @@ public final class HttpdProvider {
 		}
 	}
 
+	/**
+	 * @return true while the server is listening on {@link #HOST}:{@link #PORT}. False before
+	 *         {@link #start()}, after a failed bind, and after {@link #stop()}. See
+	 *         {@code WindowTitle}, which only appends the port to the window title while this holds.
+	 */
+	public static synchronized boolean isRunning() {
+		return server != null;
+	}
+
 	/** Stops the server and its worker pool (idempotent). */
 	public static synchronized void stop() {
 		if (server != null) {

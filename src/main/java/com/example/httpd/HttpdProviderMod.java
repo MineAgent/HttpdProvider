@@ -30,6 +30,11 @@ public class HttpdProviderMod implements ClientModInitializer {
 
 		// Start last: when the port is taken, start() logs a SEVERE line and the mods registering
 		// afterwards simply stay unregistered - the game keeps running and still exits cleanly.
-		HttpdProvider.start();
+		if (HttpdProvider.start()) {
+			// Say which port this instance is serving from the window title. Only when the server
+			// really came up: a second instance must not claim 3420. The suffix is then kept on
+			// every later title update by WindowTitleMixin.
+			WindowTitle.refresh();
+		}
 	}
 }
