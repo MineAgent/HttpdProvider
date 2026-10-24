@@ -3,7 +3,7 @@
 	"id": "httpdprovider",
 	"version": "${version}",
 	"name": "MGHttpdProvider",
-	"description": "Shared HTTP server bound to 127.0.0.1:3420 that other client mods register path prefixes on (/ctl for mcctl, /aif for AdvancedInfoFetcher). GET / lists the endpoints that are mounted right now, and the provider stops the server and ends the JVM when the client exits so Minecraft's post-main watchdog never writes a crash report.",
+	"description": "Shared HTTP server bound to 127.0.0.1:3420 that other client mods register path prefixes on (/ctl for mcctl, /aif for AdvancedInfoFetcher). GET / lists the endpoints that are mounted right now. When the client exits the provider stops its own server, so the non-daemon HTTP dispatcher cannot keep the JVM alive; it does not end the JVM and does not hide other mods' non-daemon threads.",
 	"authors": [
 		"MineAgent"
 	],

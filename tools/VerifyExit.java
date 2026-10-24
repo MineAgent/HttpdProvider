@@ -2,6 +2,7 @@
 // Copyright (C) 2026 MineAgent
 
 import com.example.httpd.HttpdProvider;
+import com.example.httpd.ProviderThreads;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -15,16 +16,17 @@ import java.util.TreeSet;
 import java.util.stream.Collectors;
 
 /**
- * Headless check of the shutdown story — no Minecraft, no window, no client.
+ * Headless check of the thread story behind the exit handling — no Minecraft, no window, no client.
  *
- * <p>Why the client needs an explicit exit at all: after the render thread returns from
- * {@code Minecraft#run()}, vanilla's {@code Main} starts a post-main watchdog; if the JVM has not
- * finished 15 seconds later it writes a bogus {@code Client shutdown from post-main} crash report
- * and calls {@code System.exit(-8)}. The JVM only finishes when every <em>non-daemon</em> thread is
- * done, and {@code com.sun.net.httpserver} owns exactly such a thread ("HTTP-Dispatcher"), as do
- * other mods (Baritone keeps a worker pool). {@code ClientExitWatcher} therefore joins the render
- * thread, stops the server and calls {@code System.exit(0)} itself — and it is armed before the
- * server is started, so a client that could not bind 3420 (a second instance) is covered too.</p>
+ * <p>Why there is exit handling at all: after the render thread returns from {@code Minecraft#run()},
+ * vanilla's {@code Main} starts a post-main watchdog; if the JVM has not finished 15 seconds later
+ * it writes a {@code Client shutdown from post-main} crash report and calls {@code System.exit(-8)}.
+ * The JVM only finishes when every <em>non-daemon</em> thread is done, and
+ * {@code com.sun.net.httpserver} owns exactly such a thread ("HTTP-Dispatcher"), as do other mods
+ * (Baritone keeps a worker pool). {@code ClientExitWatcher} joins the render thread and stops the
+ * server, which removes the dispatcher - that is all it does. It never ends the JVM: other mods'
+ * non-daemon threads are their bug, and the watchdog report about them carries a thread dump naming
+ * them, so it is deliberately not suppressed.</p>
  *
  * <p>The parts of that story that do not need the game are checked here:</p>
  *
@@ -33,13 +35,15 @@ import java.util.stream.Collectors;
  *   <li>the provider's own worker pool is a daemon, so it can never be the reason the JVM stays
  *       alive,</li>
  *   <li>{@code HttpdProvider.stop()} removes the non-daemon dispatcher thread and is idempotent,</li>
+ *   <li>{@link com.example.httpd.ProviderThreads} sees that dispatcher as its own while the server
+ *       runs and reports it gone afterwards,</li>
  *   <li>after the teardown no non-daemon thread of the provider is left.</li>
  * </ol>
  *
  * <pre>
  * LOG4J_API=~/.minecraft/libraries/org/apache/logging/log4j/log4j-api/2.26.0/log4j-api-2.26.0.jar
  * javac --release 25 -encoding UTF-8 -cp "$LOG4J_API" -d /tmp/httpd-verify \
- *   src/main/java/com/example/httpd/{HttpdProvider,PathHandler}.java tools/VerifyExit.java
+ *   src/main/java/com/example/httpd/{HttpdProvider,PathHandler,ProviderThreads}.java tools/VerifyExit.java
  * java -cp "/tmp/httpd-verify:$LOG4J_API" VerifyExit
  * </pre>
  */
@@ -73,6 +77,10 @@ public final class VerifyExit {
 		Thread worker = awaitThread("httpd-http", 2000);
 		check("the HTTP worker pool is a daemon thread", worker != null && worker.isDaemon(),
 				"threads=" + modThreads());
+		check("ProviderThreads counts the dispatcher as the provider's own non-daemon thread",
+				ProviderThreads.ownThreads().stream()
+						.anyMatch(thread -> thread.getName().equals("HTTP-Dispatcher")),
+				"own=" + ProviderThreads.describe(ProviderThreads.ownThreads()));
 
 		// 3. the teardown removes the non-daemon thread and is idempotent
 		HttpdProvider.stop();
@@ -81,6 +89,9 @@ public final class VerifyExit {
 				awaitThread("HTTP-Dispatcher", 2000) == null, "still there: " + threadNames());
 		check("HttpdProvider.stop() removed the HTTP worker pool", awaitThread("httpd-http", 2000) == null,
 				"threads=" + modThreads());
+		check("ProviderThreads.awaitOwnThreadsGone() confirms the provider's own threads are gone",
+				ProviderThreads.awaitOwnThreadsGone(2000),
+				"own=" + ProviderThreads.describe(ProviderThreads.ownThreads()));
 
 		// 4. the same thing a second client instance with a taken port would do: none of the
 		//    provider's threads exist, yet its stop() must stay harmless
@@ -100,9 +111,8 @@ public final class VerifyExit {
 				"non-daemon: " + nonDaemonNames());
 
 		System.out.println(failures == 0
-				? "EXIT TESTS: all passed — the client needs System.exit(0) because of the JDK"
-						+ " dispatcher (gone after the teardown) and other mods' threads (Baritone),"
-						+ " and no thread of the provider is non-daemon"
+				? "EXIT TESTS: all passed — the JDK dispatcher is the only non-daemon thread this mod"
+						+ " owns, stop() removes it, and ProviderThreads sees that"
 				: "EXIT TESTS: " + failures + " FAILED");
 		System.exit(failures == 0 ? 0 : 1);
 	}

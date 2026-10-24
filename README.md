@@ -65,10 +65,10 @@ API 只有两个类：`com.example.httpd.HttpdProvider`（注册入口 + `HttpdP
 ```bash
 git clone https://github.com/MineAgent/HttpdProvider
 cd HttpdProvider && ./gradlew build
-# -> build/libs/httpdprovider-1.1.0.jar
+# -> build/libs/httpdprovider-1.2.0.jar
 ```
 
-把 `httpdprovider-1.1.0.jar` 复制进你的仓库（惯例是 `libs/`），作为 **`compileOnly`** 依赖 ——
+把 `httpdprovider-1.2.0.jar` 复制进你的仓库（惯例是 `libs/`），作为 **`compileOnly`** 依赖 ——
 不要把 provider 打进你的 jar，Fabric Loader 会从 `.minecraft/mods/` 加载真正的那一份。
 
 ### 2. build.gradle
@@ -84,7 +84,7 @@ dependencies {
     implementation "net.fabricmc:fabric-loader:0.19.5"
 
     // provider 的 API, 只编译时用
-    compileOnly files('libs/httpdprovider-1.0.1.jar')
+    compileOnly files('libs/httpdprovider-1.2.0.jar')
 }
 ```
 
@@ -203,15 +203,15 @@ String body = result.get(3, TimeUnit.SECONDS);       // HTTP 线程阻塞等待
 * 需要多个 tick 才完成的任务（例如 `/op` 的合成）不要让 HTTP 线程空转：任务自己记住一个
   "完成回调 / latch"，由客户端 tick 驱动，完成时唤醒 HTTP 线程。
 
-### 7. 不要自己起服务，也不要自己处理退出
+### 7. 不要自己起服务，也不要把非 daemon 线程留给别人
 
 * 服务只有 3420 这一份，由 provider 启动；你自己 `new HttpServer` 只会端口冲突。
-* `com.sun.net.httpserver` 带非 daemon 线程，别的模组（Baritone 等）也会留非 daemon 线程。
-  关游戏时如果不显式结束 JVM，Minecraft 的 post-main 看门狗 15 秒后会写一份
-  `Client shutdown from post-main` 崩溃报告并 `System.exit(-8)`。这段逻辑在 provider 的
-  `ClientExitWatcher` 里，全局只需要一处 —— 你的模组**不要**再装自己的看门狗。
+* **你自己的线程必须是 daemon，或者退出时收干净**：JVM 只有在所有非 daemon 线程结束后才会退出，
+  漏一个，Minecraft 的 post-main 看门狗 15 秒后就会写一份 `Client shutdown from post-main` 崩溃报告并
+  `System.exit(-8)`。provider 只负责自己那个 `HTTP-Dispatcher`，**不会**替你收尾，也**不会**用
+  `System.exit` 把这份报告藏掉——那份报告的 `Thread Dump` 分类里有每个活线程的名字和栈，点名点得到你。
 * 只有确实持有需要释放的资源时（例如 mcctl 按着不放的按键、`/op` 里已经在跑的 tick 任务），
-  才加一个 `Runtime.getRuntime().addShutdownHook(...)` 做清理；正常退出交给 provider。
+  才加一个 `Runtime.getRuntime().addShutdownHook(...)` 做清理；正常退出时的服务 teardown 交给 provider。
 
 ### 8. 约定与建议
 
@@ -251,68 +251,80 @@ java -cp "/tmp/httpd-verify:$LOG4J_API" VerifyProvider          # 自检，全�
 java -cp "/tmp/httpd-verify:$LOG4J_API" VerifyProvider --serve  # 保持服务，手动 curl
 ```
 
-退出（看门狗）也能脱离游戏验证：
-
-```bash
-javac --release 25 -encoding UTF-8 -cp "$LOG4J_API" -d /tmp/httpd-verify \
-  src/main/java/com/example/httpd/{HttpdProvider,PathHandler}.java tools/VerifyExit.java
-java -cp "/tmp/httpd-verify:$LOG4J_API" VerifyExit
-```
+退出时的线程语义（谁负责收谁的线程、以及"不掩盖别人"意味着什么）也能脱离游戏验证，
+见下面[「退出时只收拾自己的摊子」](#退出时只收拾自己的摊子)。
 
 （你自己的 endpoint 如果依赖 Minecraft，可以像 mcctl 的 `tools/LoaderSmokeTest.java` 那样，
-用真实的 Minecraft 运行时 classpath 起一个"没有游戏"的 JVM 来加载入口点并 curl。）
+用真实的 Minecraft 运行时 classpath 起一个"没有游戏"的 JVM 来加载入口点并 curl；本仓库验证
+`ClientExitWatcher` 用的是更省的桩类，见 `tools/stub/`。）
 
-## 退出时不再写崩溃报告
+## 退出时只收拾自己的摊子
 
-关游戏时渲染线程返回后，`Main` 会启动一个 post-main 看门狗：15 秒内 JVM 还没结束，它就写一份
-`Client shutdown from post-main` 崩溃报告，然后 `System.exit(-8)`。而 JVM 只有**所有非 daemon 线程**都结束后
-才会自己退出——`com.sun.net.httpserver` 的服务带一个非 daemon 的 `HTTP-Dispatcher` 线程，
-Baritone 之类的模组也留着非 daemon 的 worker pool。JVM 关闭钩子救不了这个场景：
-JVM 根本没开始关闭，钩子不会执行。
+关游戏时渲染线程返回后，`Main` 会启动一个 post-main 看门狗：**15 秒内 JVM 还没结束**，它就写一份
+`Client shutdown from post-main` 崩溃报告（里面带**全线程 dump**，有每个活线程的名字、状态、栈），
+然后 `System.exit(-8)`。而 JVM 只有**所有非 daemon 线程**都结束后才会自己退出。
 
-`ClientExitWatcher` 在渲染线程（`Minecraft#getRunningThread()`）上 `join()`，线程结束后先停掉 HTTP 服务
-（`HttpServer#stop(0)`），再显式 `System.exit(0)`。关闭钩子照常执行（Minecraft 自己的那个也在内），
-所以看门狗永远不会触发；这时世界早已保存、窗口早已关闭（`exitWorldAndClose()` 在 `main()` 返回前就跑完了），
-强制退出不会丢存档。因为服务只有这一个，这段逻辑也就只需要一处。
+`com.sun.net.httpserver` 的服务带一个非 daemon 的 `HTTP-Dispatcher` 线程，是**本模组自己**留下的。
+所以渲染线程（`Minecraft#getRunningThread()`）结束后，`ClientExitWatcher` 只做一件事：停掉自己的服务
+（`HttpServer#stop(0)`），`HTTP-Dispatcher` 随之消失。此后如果没有别的非 daemon 线程，JVM 自己就退了，
+看门狗不会开火——正常退出仍然是正常退出，也不会多出一份崩溃报告。
 
-1.0.1 起还有两处细节：
+**它不调用 `System.exit`，也不去动别人的线程。** 别的模组留下的非 daemon 线程（Baritone 的 worker
+pool 就是：`new ThreadPoolExecutor(4, MAX, 60s, new SynchronousQueue<>())`，用的默认线程工厂，所以
+是非 daemon 且 core 线程不会超时退出）会让 JVM 退不掉——那是**它们的 bug**，看门狗那份带线程 dump 的
+报告是**真报告**，本模组不去掩盖它：JVM 就一直等着，15 秒后 vanilla 照常写报告、照常 `-8`。
 
-* **退出处理不依赖端口绑定成功**：`ClientExitWatcher.onClientExit(...)` 与关闭钩子在 `HttpdProvider.start()`
-  **之前**安装，端口被占用（第二个游戏实例）时也照常生效——那种情况下本模组自己没有服务，但「JVM 退不掉」
-  是**别的模组**的非 daemon 线程造成的（Baritone 的 worker pool），看门狗照样会开火。
-  `HttpdProvider::stop` 是幂等的，服务没起来时 teardown 什么也不做。
-* **不掩盖真正的失败**：如果 JVM 已经在关闭中（崩溃、`SIGTERM` 等会执行关闭钩子），守候线程只做 teardown，
-  不再 `System.exit`，以免把那次失败的退出码覆盖成 `0`。
+需要说清楚的取舍：
 
-实测（Minecraft 26.2 + Baritone，关窗口后）：
+* **代价**：装了会泄漏非 daemon 线程的模组时，每次退出仍会多一份崩溃报告、退出码 `-8`。这是**如实报告**，
+  不是本模组没做好——报告里的 `Thread Dump` 分类会直接点名是谁。
+* **换来的是**：本模组不再替别人背锅（不会因为"强制退出"把别人的泄漏静音），也不会在自己的 teardown
+  出问题时假装没事——那种情况下 `ClientExitWatcher` 会打一行 `ERROR`，把还活着的自家线程列出来。
+* `ClientExitWatcher` 是 **daemon** 线程，它自己绝不会成为 JVM 退不掉的原因；provider 的
+  `httpd-http` 线程池也是 daemon；唯一非 daemon 的自家线程就是那个 `HTTP-Dispatcher`，而它会被
+  `stop()` 收掉。`ProviderThreads` 就是用来核对这一点的（见下）。
 
-| 场景 | 退出码 | `crash-reports/` |
-| --- | --- | --- |
-| 正常（端口空闲），1.0 及以前 | `0` | 不新增 |
-| 端口被占用，**1.0** | **`-8`** | **新增 `Client shutdown from post-main`** |
-| 端口被占用，**1.0.1** | `0` | 不新增 |
+1.0.1 起的一处细节仍然保留：退出处理在 `HttpdProvider.start()` **之前**安装，端口被占用（第二个游戏
+实例）时也照常生效——`HttpdProvider::stop` 是幂等的，本模组没起服务时 teardown 什么也不做。
 
-（端口被占用用 `TestSave.sh` 启动前先占住 `127.0.0.1:3420` 复现；`mods/` 里放了 Baritone。
-1.0.1 那次日志是 `client exited, stopping the HTTP server` → `exiting the JVM so the post-main shutdown
-watchdog cannot fire`。）
-
-不需要启动客户端也能验证这套线程逻辑（`tools/VerifyExit.java`）：
+不需要启动客户端也能验证（`tools/VerifyExit.java` 查线程面，`tools/VerifyExitWatcher.java` 用桩
+`Minecraft` 跑真的 `ClientExitWatcher`）：
 
 ```bash
-javac --release 25 -encoding UTF-8 -d /tmp/httpd-verify \
-  src/main/java/com/example/httpd/{HttpdProvider,PathHandler}.java tools/VerifyExit.java
-java -cp /tmp/httpd-verify VerifyExit     # 全部 ok 才退 0
+LOG4J_API=~/.minecraft/libraries/org/apache/logging/log4j/log4j-api/2.26.0/log4j-api-2.26.0.jar
+
+# 1) 线程面：JDK 真的留非 daemon 的 HTTP-Dispatcher、provider 的池是 daemon、stop() 能收干净
+javac --release 25 -encoding UTF-8 -cp "$LOG4J_API" -d /tmp/httpd-verify \
+  src/main/java/com/example/httpd/{HttpdProvider,PathHandler,ProviderThreads}.java tools/VerifyExit.java
+java -cp "/tmp/httpd-verify:$LOG4J_API" VerifyExit          # 全部 ok 才退 0
+
+# 2) 真 watcher：clean 应约 0.5 s 自然退出（码 0），foreign 必须活到 3 s 且不掩盖
+javac --release 25 -encoding UTF-8 -cp "$LOG4J_API" -d /tmp/httpd-verify \
+  src/main/java/com/example/httpd/{HttpdProvider,PathHandler,ProviderThreads,ClientExitWatcher}.java \
+  tools/VerifyExitWatcher.java tools/stub/net/minecraft/client/Minecraft.java
+java -cp "/tmp/httpd-verify:$LOG4J_API" VerifyExitWatcher clean
+java -cp "/tmp/httpd-verify:$LOG4J_API" VerifyExitWatcher foreign
 ```
 
-它检查：JDK 确实会留下非 daemon 的 `HTTP-Dispatcher` 线程（危险是真的）、provider 自己的线程池是 daemon、
-`HttpdProvider.stop()` 能消掉那个非 daemon 线程且可重复调用、服务没起来时 `stop()` 也无害。
+`foreign` 模式的期望输出（`foreign-worker` 代表别的模组的泄漏）：
+
+```
+MARK teardown ran
+MARK non-daemon threads at 1 s: [DestroyJavaVM, foreign-worker]   ← 自家的 HTTP-Dispatcher 已经没了
+MARK this mod's own dispatcher is gone
+MARK still alive after 3 s - the JVM was not ended for us          ← 没有强制退出，没掩盖
+```
+
+同样的 `foreign` 场景下，把 1.1.1 的无条件 `System.exit(0)` 放回去，进程会在 ~0.5 s 就结束、上面后三行
+永远不会出现——那就是"掩盖"。`clean` 模式下没有任何别人的线程，约 0.5 s 自然退出、码 `0`，说明本模组的
+线程确实收干净了（如果没收干净，JVM 会一直挂着，直到测试自己的 3 秒看门狗报警）。
 
 ## 构建 / 安装
 
 需要 JDK 25（Minecraft 26.2 要求）。26.1 起官方代码不再混淆，所以 Loom 不需要 mappings 配置。
 
 ```bash
-./gradlew build      # 产物: build/libs/httpdprovider-1.1.1.jar
+./gradlew build      # 产物: build/libs/httpdprovider-1.2.0.jar
 ```
 
 把 jar 放进 `.minecraft/mods/`，再放上要用的模组（mcctl / AdvancedInfoFetcher / Craft Command）。
@@ -346,14 +358,17 @@ src/main/java/com/example/httpd/
   HttpdProviderMod.java   Fabric 客户端入口, 启动服务 + 装上退出处理 (+ 窗口标题后缀)
   HttpdProvider.java      服务 / 前缀路由 / GET / 索引 / 注册 API / isRunning()
   PathHandler.java        模组实现的接口 (exchange, 去掉前缀的子路径)
-  ClientExitWatcher.java  守候渲染线程, 客户端退出后停服务并结束 JVM
+  ClientExitWatcher.java  守候渲染线程, 客户端退出后停掉自己的服务 (不结束 JVM, 不掩盖别人的线程)
+  ProviderThreads.java    核对"还活着的非 daemon 线程里有没有自己的" (无 Minecraft 依赖)
   WindowTitle.java        窗口标题后缀 (GLFW, 无平台分支) + 启动后刷一次标题
   mixin/WindowTitleMixin.java  Window#setTitle 的参数改写 (标题每次变化都带上后缀)
 src/main/resources/
   fabric.mod.json         模组元数据 (entrypoints / mixins / depends)
   httpdprovider.mixins.json   Mixin 配置 (client 侧 WindowTitleMixin)
 tools/VerifyProvider.java 脱离游戏自检路由/索引/前缀边界/no-store (--serve 可手动 curl)
-tools/VerifyExit.java     脱离游戏验证退出/看门狗 (线程 daemon 属性 + teardown)
+tools/VerifyExit.java     脱离游戏验证线程面 (JDK dispatcher / daemon 池 / stop() / ProviderThreads)
+tools/VerifyExitWatcher.java  用桩 Minecraft 跑真的 ClientExitWatcher (clean | foreign)
+tools/stub/net/minecraft/client/Minecraft.java  仅测试用的 Minecraft 桩, 不进 jar
 ```
 
 脱离游戏验证路由层（不需要 Minecraft，退出监听只在入口点里碰）：
@@ -370,12 +385,16 @@ curl http://127.0.0.1:3420/one/echo   # 前缀分发
 curl http://127.0.0.1:3420/oneside    # 404：/one 的兄弟路径不属于 /one
 ```
 
-退出（看门狗）也能脱离游戏验证：
+退出时的线程语义也能脱离游戏验证（`VerifyExit` 查线程面，`VerifyExitWatcher` 用桩 Minecraft 跑真的
+`ClientExitWatcher`）：
 
 ```bash
 javac --release 25 -encoding UTF-8 -cp "$LOG4J_API" -d /tmp/httpd-verify \
-  src/main/java/com/example/httpd/{HttpdProvider,PathHandler}.java tools/VerifyExit.java
+  src/main/java/com/example/httpd/{HttpdProvider,PathHandler,ProviderThreads,ClientExitWatcher}.java \
+  tools/VerifyExit.java tools/VerifyExitWatcher.java tools/stub/net/minecraft/client/Minecraft.java
 java -cp "/tmp/httpd-verify:$LOG4J_API" VerifyExit
+java -cp "/tmp/httpd-verify:$LOG4J_API" VerifyExitWatcher clean
+java -cp "/tmp/httpd-verify:$LOG4J_API" VerifyExitWatcher foreign
 ```
 
 ## 安全说明
@@ -385,6 +404,15 @@ java -cp "/tmp/httpd-verify:$LOG4J_API" VerifyExit
 
 ## 版本
 
+* **1.2.0** — 只做分内的事：退出时**不再 `System.exit(0)`**，也删掉了那个只为它服务的 `shuttingDown`
+  标记与守护钩子。`ClientExitWatcher` 现在只做一件事——渲染线程结束后停掉自己的服务，让
+  `HTTP-Dispatcher` 消失；此后 JVM 自己就会退出，正常退出不会产生任何崩溃报告。别的模组留下的非 daemon
+  线程（Baritone 的 worker pool 等）本模组不再替它兜底，vanilla 的 post-main 看门狗会照常写一份带
+  `Thread Dump` 的报告并 `System.exit(-8)`——那是**真报告**，1.1.1 及以前把这个场景一并静音了，等于
+  替别人遮丑。新增 `ProviderThreads`（无 Minecraft 依赖，核对"还活着的非 daemon 线程里有没有自己的"，
+  teardown 没收干净时打 `ERROR`）和 `tools/VerifyExitWatcher.java`（桩 `Minecraft` + 真 watcher：
+  `clean` 应约 0.5 s 自然退出，`foreign` 必须活到 3 s、不掩盖）。注册与路由 API 未变，依赖方
+  （`depends httpdprovider >= 1.0`）照旧可用。
 * **1.1.1** — 三处"代码和文档/直觉不一致"的地方。① `dispatch` 在交给 handler 前统一设
   `Cache-Control: no-store`：1.1.0 其实只有 provider 自己的响应带，模组自己写的响应没有（README
   却承诺了）；② 前缀改成**按路径边界匹配**：`HttpServer` 的 context 是裸字符串前缀匹配，`/aifinfo`

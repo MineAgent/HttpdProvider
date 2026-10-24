@@ -8,24 +8,24 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 /**
- * Runs an action as soon as the Minecraft client has exited, then ends the JVM.
+ * Tears this mod's own server down as soon as the Minecraft client has exited. It never ends the
+ * JVM.
  *
- * <p>Why this is needed: when the player quits, the render thread returns from
- * {@code Minecraft#run()} and {@code net.minecraft.client.main.Main} starts its post-main watchdog
- * just before {@code main()} returns. The JVM only shuts down once every non-daemon thread has
- * finished, and {@code com.sun.net.httpserver} owns a non-daemon {@code HTTP-Dispatcher} thread.
- * Any such thread left behind makes {@code DestroyJavaVM} wait; 15 seconds later the watchdog
- * writes a bogus {@code Client shutdown from post-main} crash report and calls
- * {@code System.exit(-8)}.</p>
+ * <p>Why a teardown is needed at all: {@code com.sun.net.httpserver} owns a non-daemon
+ * {@code HTTP-Dispatcher} thread, and the JVM only exits once every non-daemon thread has finished.
+ * Left alone, that thread keeps the process alive after the player quit, and 15 seconds later
+ * Minecraft's post-main watchdog writes a {@code Client shutdown from post-main} crash report and
+ * calls {@code System.exit(-8)}. Stopping the server removes the thread, so a normal quit stays a
+ * normal quit.</p>
  *
- * <p>A JVM shutdown hook cannot help there: the JVM never begins to shut down, so the hook never
- * runs. This watcher instead listens for the client thread to die, tears the HTTP server down, and
- * then exits the JVM explicitly. Other mods can leave non-daemon threads behind as well (Baritone
- * keeps a worker pool), so simply stopping the HTTP server is not always enough.</p>
+ * <p>What this class deliberately does <em>not</em> do: it does not call {@code System.exit}. Other
+ * mods leave non-daemon threads behind as well (Baritone keeps a worker pool), and the watchdog's
+ * report about those is a true positive - it carries a full thread dump naming every live thread -
+ * so it is left in place instead of being suppressed. This class only makes sure that nothing of
+ * <em>this</em> mod is among the reasons the JVM cannot exit, and logs it when that fails.</p>
  *
- * <p>By the time the watcher fires, Minecraft has already run {@code exitWorldAndClose()} — the
- * world is saved, the window is closed — and {@code System.exit} still runs every shutdown hook
- * (Minecraft's own included), so this only skips the watchdog.</p>
+ * <p>The entrypoint also installs a shutdown hook that runs the same teardown, so a real JVM
+ * shutdown (crash, SIGTERM, {@code System.exit} somewhere else) releases the port as well.</p>
  */
 public final class ClientExitWatcher {
 	private static final Logger LOG = LogManager.getLogger("httpd");
@@ -34,29 +34,23 @@ public final class ClientExitWatcher {
 	private static final long POLL_MS = 100L;
 
 	/**
-	 * Set by {@link #onClientExit}'s shutdown hook. When a shutdown is already under way (a crash
-	 * calling {@code System.exit}, SIGTERM, ...) the watcher must not start its own exit: the JVM is
-	 * going down anyway, and racing it could overwrite the exit code of the failure that caused it.
+	 * How long to wait for this mod's own threads to disappear after the teardown. Small on purpose:
+	 * a teardown that needs longer than this is broken and should be reported, not waited out.
 	 */
-	private static volatile boolean shuttingDown;
+	private static final long OWN_THREADS_TIMEOUT_MS = 2000L;
 
 	private ClientExitWatcher() {
 	}
 
 	/**
 	 * Starts a daemon watcher: after the client thread has stopped, {@code onExit} runs once on the
-	 * watcher thread (never on the render thread, which is already gone by then) and the JVM is
-	 * then terminated.
+	 * watcher thread (never on the render thread, which is already gone by then).
 	 *
 	 * <p>Installing this must not depend on anything else having succeeded (binding the HTTP port,
-	 * for instance): the post-main watchdog fires whenever <em>any</em> non-daemon thread is left
-	 * behind, and this mod is not the only source of those.</p>
+	 * for instance): the teardown is called either way and has to be idempotent, because this mod is
+	 * not the only possible source of non-daemon threads.</p>
 	 */
 	public static void onClientExit(Runnable onExit) {
-		// A real shutdown (crash, SIGTERM, System.exit) runs the hooks: remember that so the watcher
-		// below leaves its exit code alone.
-		Runtime.getRuntime().addShutdownHook(new Thread(() -> shuttingDown = true, "httpd-exit-guard"));
-
 		Thread watcher = new Thread(() -> {
 			try {
 				Thread client = awaitClientThread();
@@ -67,27 +61,35 @@ public final class ClientExitWatcher {
 				return;
 			}
 
-			LOG.info("client exited, stopping the HTTP server");
-			try {
-				onExit.run();
-			} catch (Throwable t) {
-				LOG.warn("teardown after client exit failed", t);
-			}
-
-			if (shuttingDown) {
-				LOG.info("a JVM shutdown is already in progress, leaving its exit code alone");
-				return;
-			}
-
-			// Nothing of the game is left to do, and waiting for other mods' non-daemon threads
-			// would only let the post-main watchdog fire.
-			LOG.info("exiting the JVM so the post-main shutdown watchdog cannot fire");
-			System.exit(0);
+			tearDown(onExit);
 		}, "httpd-client-exit");
 
 		// A daemon thread: it must never be the reason the JVM stays alive itself.
 		watcher.setDaemon(true);
 		watcher.start();
+	}
+
+	/** Runs on the watcher thread once the client thread has ended. */
+	private static void tearDown(Runnable onExit) {
+		LOG.info("client exited, stopping the HTTP server");
+		try {
+			onExit.run();
+		} catch (Throwable t) {
+			LOG.error("teardown after client exit failed - this mod's own threads may keep the JVM"
+					+ " alive", t);
+		}
+
+		// Only our own threads are checked, and only to notice when the teardown above did not do its
+		// job. Foreign threads are neither reported nor worked around: keeping the JVM alive is their
+		// mod's bug, and Minecraft's post-main watchdog reports it with a thread dump.
+		if (ProviderThreads.awaitOwnThreadsGone(OWN_THREADS_TIMEOUT_MS)) {
+			LOG.debug("this mod's own threads are gone; the JVM can exit once every other non-daemon"
+					+ " thread has finished");
+		} else {
+			LOG.error("this mod's own non-daemon thread(s) are still alive: "
+					+ ProviderThreads.describe(ProviderThreads.ownThreads())
+					+ " - the JVM cannot exit until they do");
+		}
 	}
 
 	/**

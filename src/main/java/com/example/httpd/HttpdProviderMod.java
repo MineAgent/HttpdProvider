@@ -14,18 +14,20 @@ import net.fabricmc.api.ClientModInitializer;
 public class HttpdProviderMod implements ClientModInitializer {
 	@Override
 	public void onInitializeClient() {
-		// HttpServer's "HTTP-Dispatcher" thread is not a daemon, and other mods leave non-daemon
-		// threads behind as well, so without an explicit exit Minecraft's post-main watchdog would
-		// write a crash report 15 s after a normal quit. The watcher stops the server and ends the
-		// JVM once the render thread is gone.
+		// HttpServer's "HTTP-Dispatcher" thread is not a daemon, and the JVM only exits once every
+		// non-daemon thread has finished. Stopping the server when the render thread is gone removes
+		// that thread, so a normal quit really is a normal quit - no 15 s wait, no post-main watchdog
+		// crash report about this mod.
+		//
+		// Nothing beyond that: the JVM is *not* ended here. Other mods leave non-daemon threads
+		// behind too (Baritone keeps a worker pool), and a watchdog report about those is a true
+		// positive that names them in its thread dump, so it is left in place.
 		//
 		// It is installed *before* the server is started, and whether or not the server can start at
-		// all: the realistic case where binding fails is a second game instance, and the watchdog
-		// fires because of *other* mods' threads (Baritone keeps a worker pool) even when this mod's
-		// own server never came up. HttpdProvider::stop is idempotent, so the teardown is harmless
-		// then.
+		// all: the realistic case where binding fails is a second game instance, and the teardown has
+		// to be harmless then. HttpdProvider::stop is idempotent, so it is.
 		ClientExitWatcher.onClientExit(HttpdProvider::stop);
-		// Still tear down on a real JVM shutdown (crash, SIGTERM, System.exit, ...).
+		// Also tear down on a real JVM shutdown (crash, SIGTERM, System.exit elsewhere, ...).
 		Runtime.getRuntime().addShutdownHook(new Thread(HttpdProvider::stop, "httpd-shutdown"));
 
 		// Start last: when the port is taken, start() logs a SEVERE line and the mods registering

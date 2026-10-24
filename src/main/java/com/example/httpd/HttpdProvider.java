@@ -24,8 +24,10 @@ import java.util.concurrent.Executors;
  *
  * <p>Client mods register a path prefix ({@code /ctl} for mcctl, {@code /aif} for
  * AdvancedInfoFetcher, ...) and serve everything below it; {@code GET /} lists what is mounted
- * right now. The provider also owns the clean shutdown: when the client thread exits it stops the
- * server and ends the JVM, so Minecraft's post-main watchdog never writes a crash report.</p>
+ * right now. The provider also owns the clean shutdown of its own server: when the client thread
+ * exits, {@link ClientExitWatcher} stops it, so the non-daemon {@code HTTP-Dispatcher} thread cannot
+ * keep the JVM alive. It does not end the JVM - other mods' non-daemon threads are their bug, and
+ * Minecraft's post-main watchdog keeps reporting them.</p>
  *
  * <p>Registration is order independent: the server is started lazily by {@link #register} as well
  * as by the mod's own entrypoint, so it does not matter which mod's entrypoint runs first.</p>
