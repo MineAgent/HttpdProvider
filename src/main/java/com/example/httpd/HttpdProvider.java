@@ -228,7 +228,7 @@ public final class HttpdProvider {
 
 	private static synchronized String index() {
 		StringBuilder out = new StringBuilder();
-		out.append("MGHttpdProvider — Minecraft 客户端 HTTP 服务 (Fabric, Minecraft 26.2)\n")
+		out.append("MGHttpdProvider — Minecraft 客户端 HTTP 服务 (Fabric, Minecraft 26.2 / 26.3)\n")
 				.append("监听地址: http://").append(HOST).append(':').append(PORT).append("\n\n")
 				.append("  GET  /                         ").append("本说明 (当前可用的 endpoint 列表)\n");
 

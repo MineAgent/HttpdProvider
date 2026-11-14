@@ -1,4 +1,4 @@
-# MGHttpdProvider — Minecraft 客户端共享 HTTP 服务（Fabric / Minecraft 26.2）
+# MGHttpdProvider — Minecraft 客户端共享 HTTP 服务（Fabric / Minecraft 26.2 / 26.3）
 
 在 `127.0.0.1:3420` 上起**一个** HTTP 服务，供多个客户端模组挂载各自的路径前缀：
 
@@ -31,7 +31,7 @@ curl http://127.0.0.1:3420/
 服务正常起来后，游戏窗口标题会被追加 ` - 3420`：
 
 ```
-Minecraft* 26.2 - 3420
+Minecraft* 26.2 / 26.3 - 3420
 ```
 
 这样一眼就能看出这个实例是不是**这一个**在提供 `127.0.0.1:3420`：端口被别的实例占着、本模组没起来时，
@@ -40,15 +40,16 @@ Minecraft* 26.2 - 3420
 
 实现上**没有任何平台分支**，也不需要 Fabric API：
 
-* 写标题走的是 GLFW（`GLFW.glfwSetWindowTitle`，LWJGL 随 Minecraft 一起发布），
-  Linux / Windows / macOS 都是同一份代码——不碰 `user32!SetWindowText`，也不碰 X11/Wayland。
+* 写标题只依赖 Minecraft 的 `Window#setTitle`；窗口后端在 26.2 是 GLFW、26.3 是 SDL，
+  两种后端都走同一个 Java 方法，所以代码里没有 `glfwSetWindowTitle` 或 SDL 调用，也没有
+  `user32!SetWindowText`、X11/Wayland 分支。
 * 光调用一次不够：Minecraft 每次进出世界都会重新算一遍标题（`Minecraft#updateTitle` → `Window#setTitle`），
   会把后缀盖掉。所以用一个 Mixin（`com.example.httpd.mixin.WindowTitleMixin`，
   Mixin 由 Fabric Loader 自带）在 `Window#setTitle` 的参数上做一次改写：**所有**标题设置都从这里过，
   后缀不会被覆盖，重复设置也不会叠加（已经以 `" - 3420"` 结尾就不再追加）。
 * 窗口标题在入口点**之前**就算好了，窗口也是用它创建的（入口点跑在 `Minecraft` 构造器里，那时窗口还不存在），
   所以 `start()` 成功后会把一次 `updateTitle()` 排到渲染线程上（`WindowTitle.refresh()` → `Minecraft#execute`），
-  在第一个 tick、窗口已经有时执行：标题界面就带后缀，不用等进世界。GLFW 要求窗口函数在主线程调用，
+  在第一个 tick、窗口已经有时执行：标题界面就带后缀，不用等进世界。标题操作本来就只能在主线程做，
   这样也顺带满足了。
 
 ## 如何接入这个 lib（写自己的模组）
@@ -65,10 +66,10 @@ API 只有两个类：`com.example.httpd.HttpdProvider`（注册入口 + `HttpdP
 ```bash
 git clone https://github.com/MineAgent/HttpdProvider
 cd HttpdProvider && ./gradlew build
-# -> build/libs/httpdprovider-1.2.0.jar
+# -> build/libs/httpdprovider-1.2.1.jar
 ```
 
-把 `httpdprovider-1.2.0.jar` 复制进你的仓库（惯例是 `libs/`），作为 **`compileOnly`** 依赖 ——
+把 `httpdprovider-1.2.1.jar` 复制进你的仓库（惯例是 `libs/`），作为 **`compileOnly`** 依赖 ——
 不要把 provider 打进你的 jar，Fabric Loader 会从 `.minecraft/mods/` 加载真正的那一份。
 
 ### 2. build.gradle
@@ -80,11 +81,11 @@ repositories {
 
 dependencies {
     // 26.1+ 不混淆，不需要 mappings
-    minecraft "com.mojang:minecraft:26.2"
-    implementation "net.fabricmc:fabric-loader:0.19.5"
+    minecraft "com.mojang:minecraft:26.3"
+    implementation "net.fabricmc:fabric-loader:0.20.1"
 
     // provider 的 API, 只编译时用
-    compileOnly files('libs/httpdprovider-1.2.0.jar')
+    compileOnly files('libs/httpdprovider-1.2.1.jar')
 }
 ```
 
@@ -96,7 +97,7 @@ dependencies {
 {
 	"depends": {
 		"fabricloader": ">=0.19.5",
-		"minecraft": "~26.2",
+		"minecraft": ">=26.2 <26.4",
 		"java": ">=25",
 		"httpdprovider": ">=1.0"
 	}
@@ -321,10 +322,10 @@ MARK still alive after 3 s - the JVM was not ended for us          ← 没有强
 
 ## 构建 / 安装
 
-需要 JDK 25（Minecraft 26.2 要求）。26.1 起官方代码不再混淆，所以 Loom 不需要 mappings 配置。
+需要 JDK 25（Minecraft 26.2 / 26.3 要求）。26.1 起官方代码不再混淆，所以 Loom 不需要 mappings 配置。
 
 ```bash
-./gradlew build      # 产物: build/libs/httpdprovider-1.2.0.jar
+./gradlew build      # 产物: build/libs/httpdprovider-1.2.1.jar
 ```
 
 把 jar 放进 `.minecraft/mods/`，再放上要用的模组（mcctl / AdvancedInfoFetcher / Craft Command）。
@@ -335,10 +336,11 @@ MARK still alive after 3 s - the JVM was not ended for us          ← 没有强
 [00:20:14] [Render thread/INFO]: registered /aif (AdvancedInfoFetcher — 只读状态 (坐标/背包/聊天/声音/世界))
 [00:20:14] [Render thread/INFO]: registered /ctl (mcctl — 客户端远程控制 (按键/鼠标/视角/截图/Baritone))
 [00:20:14] [Render thread/INFO]: registered /op (Craft Command — 客户端容器操作 (合成/背包/熔炉/箱子/转向))
-[00:20:18] [Render thread/INFO]: window title is now "Minecraft* 26.2 - 3420"
+[00:20:18] [Render thread/INFO]: window title now carries the " - 3420" suffix
 ```
 
-最后一行是 1.1.0 加的，它读回来的正是交给 GLFW 的那份标题。
+最后一行是 1.1.0 加的；1.2.1 起不再读原生窗口标题（26.2 的 GLFW 和 26.3 的 SDL 读取方式不同），
+只记录后缀已经应用。
 
 ### 日志去哪了
 
@@ -404,6 +406,8 @@ java -cp "/tmp/httpd-verify:$LOG4J_API" VerifyExitWatcher foreign
 
 ## 版本
 
+* **1.2.1** — 26.3 兼容：标题后缀只依赖 `Window#setTitle`，不再读取原生窗口标题（26.2 是 GLFW，26.3 是 SDL），
+  因而同一个 jar 在 26.2 / 26.3 都能加载；`minecraft` 依赖放宽到 `>=26.2 <26.4`。
 * **1.2.0** — 只做分内的事：退出时**不再 `System.exit(0)`**，也删掉了那个只为它服务的 `shuttingDown`
   标记与守护钩子。`ClientExitWatcher` 现在只做一件事——渲染线程结束后停掉自己的服务，让
   `HTTP-Dispatcher` 消失；此后 JVM 自己就会退出，正常退出不会产生任何崩溃报告。别的模组留下的非 daemon

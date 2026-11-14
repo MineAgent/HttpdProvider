@@ -7,19 +7,18 @@ import com.mojang.blaze3d.platform.Window;
 import net.minecraft.client.Minecraft;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.lwjgl.glfw.GLFW;
 
 /**
  * Appends the HTTP port to the game window title while the provider is listening, so a client
  * started by this mod is recognizable as the one serving {@code 127.0.0.1:3420}.
  *
- * <p>There is deliberately no platform specific code: the title is written through GLFW (LWJGL),
- * which Minecraft already ships and which maps onto the native window API of Linux, Windows and
- * macOS alike - no {@code user32!SetWindowText}, no X11, no per-OS branch. The suffix is applied
- * inside {@link Window#setTitle(String)} (see {@code WindowTitleMixin}), which is the single place
- * every title change goes through, including Minecraft's own {@code updateTitle()} after joining or
- * leaving a world; {@link #refresh()} applies it once at startup so the very first title - the one
- * the window is created with - carries it as well.</p>
+ * <p>There is deliberately no platform specific code: the title is written through
+ * {@link Window#setTitle(String)} (see {@code WindowTitleMixin}), which is the single place every
+ * title change goes through, including Minecraft's own {@code updateTitle()} after joining or
+ * leaving a world. The native window backend behind that call is GLFW on Minecraft 26.2 and SDL on
+ * 26.3, so reading the native title is left out entirely - the mixin is backend neutral. The
+ * suffix is applied once at startup by {@link #refresh()} so the very first title - the one the
+ * window is created with - carries it as well.</p>
  *
  * <p>When the port could not be bound (a second instance), {@link HttpdProvider#isRunning()} is
  * false and the title is left completely alone.</p>
@@ -54,8 +53,8 @@ public final class WindowTitle {
 	 *
 	 * <p>The client entrypoints run inside {@code Minecraft}'s constructor, before the window is
 	 * created, so this cannot touch the title directly: {@link Minecraft#execute} queues it for the
-	 * render thread, where it runs on the first tick with the window up. GLFW requires its window
-	 * functions to be called from that thread anyway.</p>
+	 * render thread, where it runs on the first tick with the window up. Window title changes have
+	 * to happen on that thread for both the GLFW (26.2) and SDL (26.3) backends.</p>
 	 */
 	static void refresh() {
 		Minecraft minecraft = Minecraft.getInstance();
@@ -80,7 +79,7 @@ public final class WindowTitle {
 
 		try {
 			minecraft.updateTitle();
-			LOG.info("window title is now \"" + GLFW.glfwGetWindowTitle(window.handle()) + "\"");
+			LOG.info("window title now carries the \"" + SUFFIX + "\" suffix");
 		} catch (Throwable t) {
 			// A cosmetic extra must never keep the game from starting.
 			LOG.warn("could not append the port to the window title", t);
